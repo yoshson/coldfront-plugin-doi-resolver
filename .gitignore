@@ -1,0 +1,9 @@
+__pycache__/
+*.py[cod]
+.venv/
+dist/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+# Scratch database from the manual manage.py example in the README.
+coldfront.db
