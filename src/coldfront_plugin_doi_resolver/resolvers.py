@@ -35,12 +35,10 @@ and decorate in another module that is imported at startup)::
 """
 
 import logging
-import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from urllib.parse import quote
 
-import bibtexparser
 import requests
 from habanero import Crossref
 
@@ -50,6 +48,12 @@ logger = logging.getLogger(__name__)
 # the DOI_RESOLVER_CROSSREF_MAILTO setting by the app config (keeping this
 # module free of Django imports so it stays unit-testable without Django).
 CROSSREF_MAILTO: str | None = None
+
+# Personal ADS API token; populated from the DOI_RESOLVER_ADSABS_TOKEN
+# setting by the app config. The ADS API requires authentication -- the
+# legacy anonymous BibTeX endpoint is dead (see resolve_adsabs) -- so the
+# adsabs resolver is skipped when no token is configured.
+ADSABS_TOKEN: str | None = None
 
 # ---------------------------------------------------------------------------
 # Registry
@@ -91,30 +95,6 @@ def get_registered_sources() -> list[ResolverEntry]:
 # ---------------------------------------------------------------------------
 # Shared helpers
 # ---------------------------------------------------------------------------
-# LaTeX entities found in BibTeX exports (e.g. from ADS), and the plain
-# text they should become. The commands appear with one or two backslashes
-# depending on the export source, optionally followed by an empty
-# argument (``\textquotesingle{}``); all variants are handled below.
-_BIBTEX_ENTITY_REPLACEMENTS = {
-    "textquotesingle": "'",
-    "textendash": "-",
-    "textemdash": "-",
-    "textasciigrave": " ",
-    "textdaggerdbl": " ",
-    "textdagger": " ",
-}
-
-_BIBTEX_ENTITY_RE = re.compile(
-    r"\\{1,2}(" + "|".join(_BIBTEX_ENTITY_REPLACEMENTS) + r")(?:\{\})?"
-)
-
-
-def _clean_bibtex_value(value: str) -> str:
-    """Apply upstream-compatible BibTeX entity replacements and strip braces."""
-    value = _BIBTEX_ENTITY_RE.sub(
-        lambda match: _BIBTEX_ENTITY_REPLACEMENTS[match.group(1)], value
-    )
-    return re.sub(r"[{}]", "", value)
 
 
 def _no_journal(source_name: str) -> str:
@@ -155,36 +135,6 @@ def _csl_to_pub_dict(data: dict, unique_id: str, source_name: str) -> dict:
         "author": author_str,
         "year": year,
         "title": _first(data.get("title", "")),
-        "journal": journal,
-        "unique_id": unique_id,
-    }
-
-
-def _bibtex_to_pub_dict(bib_str: str, unique_id: str, source_name: str) -> dict | None:
-    """Parse a BibTeX string and return a normalised publication dict.
-
-    Returns ``None`` when *bib_str* contains no usable entries.
-    """
-    library = bibtexparser.parse_string(bib_str)
-    if not library.entries:
-        return None
-
-    entry = library.entries[0]
-
-    author = _clean_bibtex_value(entry["author"]) if "author" in entry else ""
-    # Entry.get() would return a Field *object*, not the raw value.
-    year = entry["year"] if "year" in entry else ""  # noqa: SIM401
-    title = _clean_bibtex_value(entry["title"]) if "title" in entry else ""
-
-    if "journal" in entry:
-        journal = _clean_bibtex_value(entry["journal"])
-    else:
-        journal = _no_journal(source_name)
-
-    return {
-        "author": author,
-        "year": year,
-        "title": title,
         "journal": journal,
         "unique_id": unique_id,
     }
@@ -264,11 +214,51 @@ def resolve_doi_org(unique_id: str) -> dict | None:
 
 @publication_resolver("adsabs", "https://ui.adsabs.harvard.edu/")
 def resolve_adsabs(unique_id: str) -> dict | None:
-    """Resolve a bibcode via the ADS abstract service (BibTeX export)."""
-    url = (
-        "http://adsabs.harvard.edu/cgi-bin/nph-bib_query"
-        f"?bibcode={quote(unique_id)}&data_type=BIBTEX"
+    """Resolve a bibcode via the ADS API (requires a personal API token).
+
+    The legacy anonymous BibTeX endpoint
+    (``adsabs.harvard.edu/cgi-bin/nph-bib_query``) is dead: it redirects
+    to the ADS UI, which is fronted by bot protection, so it no longer
+    returns BibTeX. The supported ADS API needs a free personal token
+    (https://ui.adsabs.harvard.edu/user/settings/token), configured via
+    the ``DOI_RESOLVER_ADSABS_TOKEN`` setting. Without a token this
+    resolver returns ``None`` and the search moves on.
+    """
+    if not ADSABS_TOKEN:
+        logger.info(
+            "adsabs resolver skipped: no ADS API token configured "
+            "(set DOI_RESOLVER_ADSABS_TOKEN in your ColdFront settings)."
+        )
+        return None
+
+    # Guard the Solr quoted phrase below against quote injection.
+    if '"' in unique_id:
+        return None
+
+    r = requests.get(
+        "https://api.adsabs.harvard.edu/v1/search/query",
+        params={
+            "q": f'bibcode:"{unique_id}"',
+            "fl": "author,title,year,pub",
+            "rows": 1,
+        },
+        headers={"Authorization": f"Bearer {ADSABS_TOKEN}"},
+        timeout=8,
     )
-    r = requests.get(url, timeout=5)
     r.raise_for_status()
-    return _bibtex_to_pub_dict(r.text, unique_id, "adsabs")
+
+    docs = r.json().get("response", {}).get("docs", [])
+    if not docs:
+        return None
+    doc = docs[0]
+
+    authors = doc.get("author") or []
+    titles = doc.get("title") or []
+
+    return {
+        "author": " and ".join(authors),
+        "year": str(doc.get("year") or ""),
+        "title": titles[0] if titles else "",
+        "journal": doc.get("pub") or _no_journal("adsabs"),
+        "unique_id": unique_id,
+    }

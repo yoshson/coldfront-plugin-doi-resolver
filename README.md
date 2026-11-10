@@ -19,7 +19,7 @@ entirely in code (`coldfront_plugin_doi_resolver/resolvers.py`):
 | `crossref.org` | Crossref API via [habanero](https://pypi.org/project/habanero/) | 1 |
 | `datacite.org` | DataCite public REST API | 2 |
 | `doi.org`      | doi.org content negotiation (CSL-JSON) — works for *all* RAs | 3 |
-| `adsabs`       | ADS abstract service (BibTeX export) | 4 |
+| `adsabs`       | ADS API — requires a personal API token | 4 |
 
 The first resolver that returns metadata wins. No database rows decide
 which resolvers run, and nothing needs to be seeded: ColdFront still
@@ -47,13 +47,23 @@ DOIs. The plugin therefore calls DataCite's public REST endpoint
 (`https://api.datacite.org/dois/<doi>`) directly, which needs no
 authentication.
 
-### BibTeX parsing
+### Why the ADS resolver needs a token
 
-Only the ADS resolver deals with BibTeX (ADS has no JSON export). The
-plugin uses `bibtexparser` 2.x — the same major version as current
-ColdFront — so no version pinning is needed. LaTeX entities in ADS
-exports (`\textquotesingle`, `\textendash`, …) are replaced with plain
-text regardless of whether they appear with one or two backslashes.
+Earlier versions (and stock ColdFront) fetched BibTeX for a bibcode from
+ADS's anonymous legacy endpoint
+(`adsabs.harvard.edu/cgi-bin/nph-bib_query`). That endpoint is dead: it
+redirects to the ADS UI, which is fronted by bot protection, so every
+bibcode lookup silently failed. The supported replacement is the
+[ADS API](https://ui.adsabs.harvard.edu/help/api/), which requires a
+**free personal API token** (create one at
+[ADS user settings](https://ui.adsabs.harvard.edu/user/settings/token))
+configured via the `DOI_RESOLVER_ADSABS_TOKEN` setting. Without a token
+the `adsabs` resolver is skipped (it returns `None`), so DOI lookups
+keep working and only bibcode lookups fail.
+
+Because the ADS API returns JSON, no resolver deals with BibTeX anymore —
+the `bibtexparser` dependency is gone entirely, consistent with the
+habanero approach for Crossref.
 
 ## Installation
 
@@ -94,6 +104,7 @@ hooks into the publication search at application startup.
 | --- | --- | --- |
 | `DOI_RESOLVER_PATCH_PUBLICATION_SEARCH` | `True` | Automatically integrate with ColdFront: replace `PublicationSearchResultView._search_id` with the fixed resolver registry. Set to `False` if you want to wire things up yourself (mix `coldfront_plugin_doi_resolver.views.PublicationSearchResultMixin` into a custom view). |
 | `DOI_RESOLVER_CROSSREF_MAILTO` | `None` | Contact address passed to Crossref so your requests use their "polite API" pool. |
+| `DOI_RESOLVER_ADSABS_TOKEN` | `None` | Personal ADS API token ([get one here](https://ui.adsabs.harvard.edu/user/settings/token)) used as the `Authorization: Bearer` credential for bibcode lookups. Without it the `adsabs` resolver is skipped. |
 
 ## Adding a new registration agency
 

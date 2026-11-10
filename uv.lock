@@ -210,10 +210,9 @@ wheels = [
 
 [[package]]
 name = "coldfront-plugin-doi-resolver"
-version = "0.1.0"
+version = "0.2.0"
 source = { editable = "." }
 dependencies = [
-    { name = "bibtexparser" },
     { name = "django" },
     { name = "habanero" },
     { name = "requests" },
@@ -231,7 +230,6 @@ integration = [
 
 [package.metadata]
 requires-dist = [
-    { name = "bibtexparser", specifier = ">=2.0" },
     { name = "django", specifier = ">=5.2" },
     { name = "habanero", specifier = ">=1.2" },
     { name = "requests", specifier = ">=2.31" },

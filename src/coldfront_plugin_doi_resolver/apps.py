@@ -26,6 +26,9 @@ class DoiResolverConfig(AppConfig):
             settings, "DOI_RESOLVER_CROSSREF_MAILTO", None
         )
 
+        # Optional personal ADS API token for the adsabs (bibcode) resolver.
+        resolvers.ADSABS_TOKEN = getattr(settings, "DOI_RESOLVER_ADSABS_TOKEN", None)
+
         # The automatic integration can be disabled, e.g. to combine the
         # mixin into a custom PublicationSearchResultView manually.
         if not getattr(settings, "DOI_RESOLVER_PATCH_PUBLICATION_SEARCH", True):

@@ -9,7 +9,6 @@ import requests
 
 from coldfront_plugin_doi_resolver import resolvers
 from coldfront_plugin_doi_resolver.resolvers import (
-    _bibtex_to_pub_dict,
     get_registered_sources,
     get_resolver,
 )
@@ -271,76 +270,110 @@ def test_resolve_doi_org_publisher_as_author(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# adsabs (BibTeX export)
+# adsabs (ADS API, token required)
 # ---------------------------------------------------------------------------
 
-ADS_BIBTEX = """@ARTICLE{2013ApJS..204...19W,
-       author = {{Woodruff}, {R.~A.} and {McKee}, {C.~F.}},
-        title = "{On the Relationship Between {SCUBA} and {MIPS}}",
-      journal = {\\textquotesingle{}The Astrophysical Journal Supplement Series\\textquotesingle{}},
-         year = 2013,
-}"""
+ADS_PAYLOAD = {
+    "responseHeader": {"status": 0, "QTime": 5},
+    "response": {
+        "numFound": 1,
+        "start": 0,
+        "docs": [
+            {
+                "author": ["Woodruff, R. A.", "McKee, C. F."],
+                "pub": "The Astrophysical Journal Supplement Series",
+                "title": ["On the Relationship Between SCUBA and MIPS"],
+                "year": "2013",
+            }
+        ],
+    },
+}
 
 
 def test_resolve_adsabs(monkeypatch):
-    def fake_get(url, timeout=None):
-        assert "bibcode=2013ApJS..204...19W" in url
-        assert "data_type=BIBTEX" in url
-        return FakeResponse(text=ADS_BIBTEX)
+    monkeypatch.setattr(resolvers, "ADSABS_TOKEN", "secret-token")
+    calls = {}
+
+    def fake_get(url, params=None, headers=None, timeout=None):
+        calls["url"] = url
+        calls["params"] = params
+        calls["headers"] = headers
+        return FakeResponse(json_data=ADS_PAYLOAD)
 
     monkeypatch.setattr(resolvers.requests, "get", fake_get)
     pub = resolvers.resolve_adsabs("2013ApJS..204...19W")
-    assert pub["author"] == "Woodruff, R.~A. and McKee, C.~F."
-    assert pub["year"] == "2013"
-    assert "SCUBA" in pub["title"]
-    assert pub["journal"].startswith("'")  # textquotesingle replaced by '
-    assert pub["unique_id"] == "2013ApJS..204...19W"
+    assert calls["url"] == "https://api.adsabs.harvard.edu/v1/search/query"
+    assert calls["params"]["q"] == 'bibcode:"2013ApJS..204...19W"'
+    assert calls["params"]["fl"] == "author,title,year,pub"
+    assert calls["headers"]["Authorization"] == "Bearer secret-token"
+    assert pub == {
+        "author": "Woodruff, R. A. and McKee, C. F.",
+        "year": "2013",
+        "title": "On the Relationship Between SCUBA and MIPS",
+        "journal": "The Astrophysical Journal Supplement Series",
+        "unique_id": "2013ApJS..204...19W",
+    }
+
+
+def test_resolve_adsabs_without_token(monkeypatch):
+    monkeypatch.setattr(resolvers, "ADSABS_TOKEN", None)
+
+    def fail_get(*args, **kwargs):
+        raise AssertionError("no HTTP call expected without a token")
+
+    monkeypatch.setattr(resolvers.requests, "get", fail_get)
+    assert resolvers.resolve_adsabs("2013ApJS..204...19W") is None
 
 
 def test_resolve_adsabs_http_error(monkeypatch):
+    monkeypatch.setattr(resolvers, "ADSABS_TOKEN", "secret-token")
     response = FakeResponse(ok=False)
-    monkeypatch.setattr(resolvers.requests, "get", lambda url, timeout=None: response)
+    monkeypatch.setattr(resolvers.requests, "get", lambda url, **kwargs: response)
     with pytest.raises(requests.HTTPError):
         resolvers.resolve_adsabs("not-a-bibcode")
 
 
-# ---------------------------------------------------------------------------
-# BibTeX parsing helpers
-# ---------------------------------------------------------------------------
-
-
-def test_bibtex_to_pub_dict_journal_fallback():
-    pub = _bibtex_to_pub_dict(
-        "@misc{foo,\n  author = {Doe, Jane},\n  title = {Some Dataset},\n  year = 2021,\n}",
-        "10.1234/foo",
-        "adsabs",
+def test_resolve_adsabs_no_match(monkeypatch):
+    monkeypatch.setattr(resolvers, "ADSABS_TOKEN", "secret-token")
+    payload = {"response": {"numFound": 0, "start": 0, "docs": []}}
+    monkeypatch.setattr(
+        resolvers.requests,
+        "get",
+        lambda url, **kwargs: FakeResponse(json_data=payload),
     )
+    assert resolvers.resolve_adsabs("1900ApJ.....1....1Z") is None
+
+
+def test_resolve_adsabs_journal_fallback(monkeypatch):
+    monkeypatch.setattr(resolvers, "ADSABS_TOKEN", "secret-token")
+    payload = {
+        "response": {
+            "docs": [
+                {
+                    "author": ["Doe, Jane"],
+                    "title": ["Some Preprint"],
+                    "year": 2021,
+                }
+            ]
+        }
+    }
+    monkeypatch.setattr(
+        resolvers.requests,
+        "get",
+        lambda url, **kwargs: FakeResponse(json_data=payload),
+    )
+    pub = resolvers.resolve_adsabs("2021arXiv21010001D")
+    assert pub["author"] == "Doe, Jane"
+    assert pub["year"] == "2021"
     assert pub["journal"] == "[no journal info from ADSABS]"
 
 
-def test_bibtex_to_pub_dict_no_entries():
-    assert _bibtex_to_pub_dict("not bibtex at all", "10.1234/foo", "adsabs") is None
+def test_resolve_adsabs_rejects_quote_injection(monkeypatch):
+    # A double quote would break out of the Solr quoted bibcode phrase.
+    monkeypatch.setattr(resolvers, "ADSABS_TOKEN", "secret-token")
 
+    def fail_get(*args, **kwargs):
+        raise AssertionError("no HTTP call expected for a malformed bibcode")
 
-def test_bibtex_to_pub_dict_strips_braces_and_entities():
-    # LaTeX entities appear with one or two backslashes depending on the
-    # export source, optionally with an empty argument; all variants are
-    # replaced.
-    pub = _bibtex_to_pub_dict(
-        "@article{foo, author = {Doe, J{\\textquotesingle}ane},"
-        " title = {A {Study}}, journal = {J.~Foo}, year = 2020}",
-        "10.1234/foo",
-        "crossref.org",
-    )
-    assert pub["author"] == "Doe, J'ane"
-    assert pub["title"] == "A Study"
-    assert pub["journal"] == "J.~Foo"
-    assert pub["year"] == "2020"
-
-    pub = _bibtex_to_pub_dict(
-        "@article{bar, author = {Doe, J{\\\\textquotesingle{}ane}},"
-        " title = {A {Study}}, journal = {J.~Foo}, year = 2020}",
-        "10.1234/bar",
-        "crossref.org",
-    )
-    assert pub["author"] == "Doe, J'ane"
+    monkeypatch.setattr(resolvers.requests, "get", fail_get)
+    assert resolvers.resolve_adsabs('foo" OR title:bar') is None
